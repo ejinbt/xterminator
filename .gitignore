@@ -1,0 +1,30 @@
+# Secrets - NEVER commit these
+.env
+accounts.txt
+accounts.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+
+# Output / data
+*.csv
+*.json
+results.*
+monitor_*.csv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

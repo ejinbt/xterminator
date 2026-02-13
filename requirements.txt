@@ -1,0 +1,6 @@
+twscrape
+pandas
+loguru
+python-telegram-bot
+aiohttp
+python-dotenv
