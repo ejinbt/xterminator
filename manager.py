@@ -21,9 +21,9 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, Comma
 from monitor import TokenMonitor
 from token_tracker import tracker
 
-# Token info APIs
+# Token info APIs (order: GeckoTerminal → DexScreener fallback)
+GECKOTERMINAL_API = "https://api.geckoterminal.com/api/v2/search/pools?query={token}&page=1"
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/search?q={token}"
-JUPITER_TOKEN_API = "https://tokens.jup.ag/token/{mint}"
 
 # Leaderboard interval (seconds)
 LEADERBOARD_INTERVAL = 900  # 15 minutes
@@ -62,21 +62,10 @@ def extract_token(text):
     
     return None
 
-def is_solana_address(token_address: str) -> bool:
-    """Check if address looks like Solana (base58, 32-44 chars, not 0x)"""
-    if not token_address:
-        return False
-    if token_address.startswith("0x"):
-        return False
-    if len(token_address) < 32 or len(token_address) > 44:
-        return False
-    # Base58 charset check
-    base58_chars = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-    return all(c in base58_chars for c in token_address)
-
 async def get_token_info(token_address: str):
     """
-    Fetch token info. Tries DexScreener first, falls back to Jupiter for Solana.
+    Fetch token info. Tries GeckoTerminal first (no Cloudflare), 
+    falls back to DexScreener.
     Returns (name, ticker, chain) or (None, None, None).
     """
     # Check cache first
@@ -84,31 +73,77 @@ async def get_token_info(token_address: str):
         logger.info(f"📦 Cache hit for {token_address[:16]}...")
         return TOKEN_INFO_CACHE[token_address]
     
-    # Try DexScreener (with retries)
-    result = await _fetch_from_dexscreener(token_address)
+    # Try GeckoTerminal first (no Cloudflare blocking from VPS)
+    result = await _fetch_from_geckoterminal(token_address)
     if result[0] or result[1]:  # Got a name or ticker
         TOKEN_INFO_CACHE[token_address] = result
         return result
     
-    # Fallback: Jupiter (Solana only)
-    if is_solana_address(token_address):
-        logger.info(f"🪐 Trying Jupiter fallback...")
-        result = await _fetch_from_jupiter(token_address)
-        if result[0] or result[1]:
-            TOKEN_INFO_CACHE[token_address] = result
-            return result
+    # Fallback: DexScreener (may be blocked by Cloudflare on VPS)
+    logger.info(f"🔄 GeckoTerminal missed, trying DexScreener fallback...")
+    result = await _fetch_from_dexscreener(token_address)
+    if result[0] or result[1]:
+        TOKEN_INFO_CACHE[token_address] = result
+        return result
     
     return None, None, None
 
+async def _fetch_from_geckoterminal(token_address: str):
+    """GeckoTerminal pool search - free, no Cloudflare blocking from VPS"""
+    url = GECKOTERMINAL_API.format(token=token_address)
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    pools = data.get('data', [])
+                    
+                    if pools:
+                        pool = pools[0]
+                        attrs = pool.get('attributes', {})
+                        
+                        # Pool name format: "TOKEN / SOL" or "TOKEN / USDT"
+                        pool_name = attrs.get('name', '')
+                        name = pool_name.split(' / ')[0].strip() if ' / ' in pool_name else pool_name
+                        
+                        # Chain from base_token ID: "solana_xxx" or "eth_xxx"
+                        base_token_id = (pool.get('relationships', {})
+                                         .get('base_token', {})
+                                         .get('data', {})
+                                         .get('id', ''))
+                        chain = base_token_id.split('_')[0] if '_' in base_token_id else 'unknown'
+                        
+                        ticker = f"${name}" if name else None
+                        
+                        logger.info(f"✅ GeckoTerminal: {name} ({ticker}) on {chain}")
+                        return name, ticker, chain
+                    else:
+                        logger.warning(f"⚠️ Token not found on GeckoTerminal")
+                        return None, None, None
+                
+                elif response.status == 429:
+                    logger.warning(f"⚠️ GeckoTerminal rate limited (429)")
+                    return None, None, None
+                else:
+                    logger.warning(f"⚠️ GeckoTerminal HTTP {response.status}")
+                    return None, None, None
+    except asyncio.TimeoutError:
+        logger.warning(f"⚠️ GeckoTerminal timeout")
+        return None, None, None
+    except Exception as e:
+        logger.error(f"❌ GeckoTerminal error: {e}")
+        return None, None, None
+
 async def _fetch_from_dexscreener(token_address: str):
-    """DexScreener with retry + backoff"""
+    """DexScreener fallback with retry + backoff (may be blocked by Cloudflare on VPS)"""
     url = DEXSCREENER_API.format(token=token_address)
     
     async with aiohttp.ClientSession() as session:
         for attempt in range(3):
             try:
                 logger.info(f"🔍 DexScreener attempt {attempt + 1}/3...")
-                async with session.get(url, timeout=10) as response:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
                     if response.status == 200:
                         data = await response.json()
                         pairs = data.get('pairs', [])
@@ -127,9 +162,9 @@ async def _fetch_from_dexscreener(token_address: str):
                             logger.warning(f"⚠️ Token not found on DexScreener")
                             return None, None, None
                     
-                    elif response.status == 429:
+                    elif response.status == 429 or response.status == 1015:
                         wait = 30 * (attempt + 1)
-                        logger.warning(f"⚠️ DexScreener 429 rate limit. Waiting {wait}s...")
+                        logger.warning(f"⚠️ DexScreener {response.status} rate limit. Waiting {wait}s...")
                         await asyncio.sleep(wait)
                         continue
                     
@@ -152,30 +187,6 @@ async def _fetch_from_dexscreener(token_address: str):
                     continue
     
     return None, None, None
-
-async def _fetch_from_jupiter(token_address: str):
-    """Jupiter token metadata fallback (Solana only)"""
-    url = JUPITER_TOKEN_API.format(mint=token_address)
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    
-                    if data:
-                        name = data.get('name') or None
-                        symbol = data.get('symbol') or None
-                        ticker = f"${symbol}" if symbol else None
-                        
-                        logger.info(f"✅ Jupiter: {name} ({ticker})")
-                        return name, ticker, "solana"
-                
-                logger.warning(f"⚠️ Jupiter returned {response.status}")
-                return None, None, None
-    except Exception as e:
-        logger.error(f"❌ Jupiter error: {e}")
-        return None, None, None
 
 
 
@@ -614,7 +625,7 @@ def main():
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & ~filters.COMMAND, handle_message))
     
     logger.info(f"👂 Listening for messages...")
-    logger.info(f"🔍 Using DexScreener Search API (supports all chains)")
+    logger.info(f"🔍 Token info: GeckoTerminal → DexScreener fallback")
     logger.info(f"📊 Default mode: {tracker.mode}")
     logger.info("=" * 50)
     logger.info("**COMMANDS:**")
