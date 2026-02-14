@@ -410,9 +410,45 @@ async def cmd_wake(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /restart command to restart the bot process"""
     await update.message.reply_text("🔄 Restarting bot...", parse_mode='Markdown')
-    # Small delay to ensure message is sent
     await asyncio.sleep(1)
     os.execl(sys.executable, sys.executable, *sys.argv)
+
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /reset command to clear all data and start fresh"""
+    global PROCESSED_CAS, TOKEN_INFO_CACHE
+    import glob
+    
+    # Count what we're clearing
+    token_count = len(tracker.tokens)
+    csv_files = glob.glob("monitor_*.csv")
+    csv_count = len(csv_files)
+    cache_count = len(TOKEN_INFO_CACHE)
+    
+    # Clear tracker (all tokens)
+    tracker.tokens.clear()
+    
+    # Clear processed CAs
+    PROCESSED_CAS.clear()
+    
+    # Clear token info cache
+    TOKEN_INFO_CACHE.clear()
+    
+    # Delete CSV files
+    for f in csv_files:
+        try:
+            os.remove(f)
+        except Exception as e:
+            logger.warning(f"Could not delete {f}: {e}")
+    
+    msg = (
+        f"🗑️ **Reset Complete**\n\n"
+        f"• Tokens cleared: {token_count}\n"
+        f"• CSVs deleted: {csv_count}\n"
+        f"• Cache cleared: {cache_count}\n\n"
+        f"_Ready for fresh monitoring_"
+    )
+    await update.message.reply_text(msg, parse_mode='Markdown')
+    logger.info(f"🗑️ Reset: {token_count} tokens, {csv_count} CSVs, {cache_count} cached")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /status command to show current tracking status for this channel"""
@@ -571,6 +607,7 @@ def main():
     app.add_handler(CommandHandler("sleep", cmd_sleep))
     app.add_handler(CommandHandler("wake", cmd_wake))
     app.add_handler(CommandHandler("restart", cmd_restart))
+    app.add_handler(CommandHandler("reset", cmd_reset))
     
     # Listen for messages (exclude commands with ~filters.COMMAND)
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
