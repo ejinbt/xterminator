@@ -1,11 +1,12 @@
+"""
+Scraper Utilities - Account loading and SSL patches for proxy support.
+"""
 import asyncio
 import os
 import ssl
 import warnings
 
-# ============================================
-# GLOBAL SSL FIX FOR BRIGHT DATA PROXY
-# ============================================
+# SSL fix for Bright Data / intercepting proxies
 # This disables SSL verification globally since Bright Data
 # uses its own certificate for HTTPS interception
 

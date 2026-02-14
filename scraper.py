@@ -1,16 +1,18 @@
+"""
+Twitter Scraper - twscrape wrapper with SSL and JSON parsing patches.
+"""
 import asyncio
-import random
 import json
+import random
 import re
 import ssl
+
 import httpx
 import pandas as pd
-from twscrape import API, gather
+from twscrape import API
 from twscrape.logger import set_log_level
 
-# ============================================
-# PATCH 1: Disable SSL verification for proxies
-# ============================================
+# SSL patch for proxy support
 # Create SSL context that doesn't verify certificates
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False

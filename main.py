@@ -1,19 +1,19 @@
-import asyncio
-import ssl
+"""
+X-Terminator Entry Point
+Applies SSL patches and launches the bot.
+"""
 import os
+import ssl
 import warnings
 
-# ============================================
-# APPLY SSL FIX FIRST - BEFORE ANY IMPORTS
-# ============================================
+# Apply SSL fix before any network imports
 warnings.filterwarnings('ignore')
 ssl._create_default_https_context = ssl._create_unverified_context
 os.environ['PYTHONHTTPSVERIFY'] = '0'
 
-# Apply SSL patch
-import scraper_utils
+import scraper_utils  # Applies httpx/aiohttp SSL patches
 
 from manager import main
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

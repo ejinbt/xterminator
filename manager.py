@@ -1,10 +1,15 @@
+"""
+X-Terminator Telegram Bot
+Handles message processing, commands, and token monitoring orchestration.
+"""
 import asyncio
-import os
-import sys
-import re
-import aiohttp
-from typing import Optional
 import datetime
+import os
+import re
+import sys
+from typing import Optional
+
+import aiohttp
 
 # Import scraper_utils FIRST to apply SSL patch
 from scraper_utils import load_accounts
@@ -16,11 +21,15 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, Comma
 from monitor import TokenMonitor
 from token_tracker import tracker
 
-# DexScreener Search API (works for any chain)
+# Token info APIs
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/search?q={token}"
+JUPITER_TOKEN_API = "https://tokens.jup.ag/token/{mint}"
 
 # Leaderboard interval (seconds)
-LEADERBOARD_INTERVAL = 900  # 15 minutes (change to 60 for testing)
+LEADERBOARD_INTERVAL = 900  # 15 minutes
+
+# TOKEN CACHE
+TOKEN_INFO_CACHE = {}  # token_address -> (name, ticker, chain)
 
 # Sleep control
 SLEEP_UNTIL: Optional[datetime.datetime] = None
@@ -53,50 +62,122 @@ def extract_token(text):
     
     return None
 
-async def get_token_info_from_dexscreener(token_address: str):
+def is_solana_address(token_address: str) -> bool:
+    """Check if address looks like Solana (base58, 32-44 chars, not 0x)"""
+    if not token_address:
+        return False
+    if token_address.startswith("0x"):
+        return False
+    if len(token_address) < 32 or len(token_address) > 44:
+        return False
+    # Base58 charset check
+    base58_chars = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+    return all(c in base58_chars for c in token_address)
+
+async def get_token_info(token_address: str):
     """
-    Fetch token info from DexScreener Search API.
-    Returns (name, ticker, chain) or (None, None, None) if not found.
+    Fetch token info. Tries DexScreener first, falls back to Jupiter for Solana.
+    Returns (name, ticker, chain) or (None, None, None).
     """
+    # Check cache first
+    if token_address in TOKEN_INFO_CACHE:
+        logger.info(f"📦 Cache hit for {token_address[:16]}...")
+        return TOKEN_INFO_CACHE[token_address]
+    
+    # Try DexScreener (with retries)
+    result = await _fetch_from_dexscreener(token_address)
+    if result[0] or result[1]:  # Got a name or ticker
+        TOKEN_INFO_CACHE[token_address] = result
+        return result
+    
+    # Fallback: Jupiter (Solana only)
+    if is_solana_address(token_address):
+        logger.info(f"🪐 Trying Jupiter fallback...")
+        result = await _fetch_from_jupiter(token_address)
+        if result[0] or result[1]:
+            TOKEN_INFO_CACHE[token_address] = result
+            return result
+    
+    return None, None, None
+
+async def _fetch_from_dexscreener(token_address: str):
+    """DexScreener with retry + backoff"""
+    url = DEXSCREENER_API.format(token=token_address)
+    
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(3):
+            try:
+                logger.info(f"🔍 DexScreener attempt {attempt + 1}/3...")
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        pairs = data.get('pairs', [])
+                        
+                        if pairs and len(pairs) > 0:
+                            pair = pairs[0]
+                            base_token = pair.get('baseToken', {})
+                            name = base_token.get('name') or None
+                            symbol = base_token.get('symbol') or None
+                            chain = pair.get('chainId', 'unknown')
+                            ticker = f"${symbol}" if symbol else None
+                            
+                            logger.info(f"✅ DexScreener: {name} ({ticker}) on {chain}")
+                            return name, ticker, chain
+                        else:
+                            logger.warning(f"⚠️ Token not found on DexScreener")
+                            return None, None, None
+                    
+                    elif response.status == 429:
+                        wait = 30 * (attempt + 1)
+                        logger.warning(f"⚠️ DexScreener 429 rate limit. Waiting {wait}s...")
+                        await asyncio.sleep(wait)
+                        continue
+                    
+                    else:
+                        logger.warning(f"⚠️ DexScreener HTTP {response.status}")
+                        if attempt < 2:
+                            await asyncio.sleep(5)
+                            continue
+                        return None, None, None
+            
+            except asyncio.TimeoutError:
+                logger.warning(f"⚠️ DexScreener timeout (attempt {attempt + 1})")
+                if attempt < 2:
+                    await asyncio.sleep(5)
+                    continue
+            except Exception as e:
+                logger.error(f"❌ DexScreener error: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(5)
+                    continue
+    
+    return None, None, None
+
+async def _fetch_from_jupiter(token_address: str):
+    """Jupiter token metadata fallback (Solana only)"""
+    url = JUPITER_TOKEN_API.format(mint=token_address)
+    
     try:
-        url = DEXSCREENER_API.format(token=token_address)
-        logger.info(f"🔍 Fetching token info from DexScreener...")
-        
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()
                     
-                    # Search API returns { pairs: [...] }
-                    pairs = data.get('pairs', [])
-                    
-                    if pairs and len(pairs) > 0:
-                        pair = pairs[0]  # Get first pair (highest liquidity usually)
+                    if data:
+                        name = data.get('name') or None
+                        symbol = data.get('symbol') or None
+                        ticker = f"${symbol}" if symbol else None
                         
-                        base_token = pair.get('baseToken', {})
-                        name = base_token.get('name')
-                        symbol = base_token.get('symbol')
-                        chain = pair.get('chainId', 'unknown')
-                        
-                        if symbol:
-                            ticker = f"${symbol}"
-                        else:
-                            ticker = None
-                        
-                        logger.info(f"✅ DexScreener: {name} ({ticker}) on {chain}")
-                        return name, ticker, chain
-                    else:
-                        logger.warning(f"⚠️ Token not found on DexScreener")
-                        return None, None, None
-                else:
-                    logger.warning(f"⚠️ DexScreener API error: {response.status}")
-                    return None, None, None
-    except asyncio.TimeoutError:
-        logger.warning(f"⚠️ DexScreener API timeout")
-        return None, None, None
+                        logger.info(f"✅ Jupiter: {name} ({ticker})")
+                        return name, ticker, "solana"
+                
+                logger.warning(f"⚠️ Jupiter returned {response.status}")
+                return None, None, None
     except Exception as e:
-        logger.error(f"❌ DexScreener API error: {e}")
+        logger.error(f"❌ Jupiter error: {e}")
         return None, None, None
+
+
 
 # Store channel IDs as set globally after parsing
 CHANNEL_IDS = set()  # Empty set = listen to all chats
@@ -174,7 +255,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     
     chat_id = update.effective_chat.id
-    chat_type = update.effective_chat.type
     
     # Check if this is from one of our target chats (empty set = allow all)
     if CHANNEL_IDS and chat_id not in CHANNEL_IDS:
@@ -212,16 +292,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         PROCESSED_CAS[token].add(chat_id)
         
         # Check if token was already scraped (seen in another channel)
-        from token_tracker import tracker as tk
-        existing_stats = tk.get_stats(token)
+        existing_stats = tracker.get_stats(token)
         
         if existing_stats:
             # Already scraped - add this channel and send existing results
             logger.info(f"📤 Sending existing results for {token_short} to chat {chat_id}")
-            
-            # Register this channel with the token
-            from token_tracker import tracker as tk
-            tk.add_channel_to_token(token, chat_id)
+            tracker.add_channel_to_token(token, chat_id)
             
             await send_initial_notification(
                 bot=context.bot,
@@ -237,8 +313,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # New token - scrape and start monitoring
             logger.info(f"📝 New CA detected: {token_short}")
             
-            # Get token info from DexScreener
-            name, ticker, chain = await get_token_info_from_dexscreener(token)
+            # Get token info (DexScreener → Jupiter fallback)
+            name, ticker, chain = await get_token_info(token)
             
             if chain:
                 logger.info(f"🔗 Chain: {chain}")
@@ -378,14 +454,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"🤖 **X-Terminator**\n\n"
         f"📌 **Commands**\n"
-        f"`/mode` - Switch mode\n"
-        f"`/status` - Active monitors\n"
-        f"`/top` - Show leaderboard\n\n"
+        f"`/mode` - Switch notification mode\n"
+        f"`/status` - Active monitors (this chat)\n"
+        f"`/top` - Show leaderboard now\n"
+        f"`/sleep [min]` - Pause for N minutes\n"
+        f"`/wake` - Resume monitoring\n"
+        f"`/restart` - Restart bot process\n\n"
         f"📌 **Modes**\n"
-        f"• Legacy - Individual tweets\n"
-        f"• Leaderboard - Top 30 summary\n\n"
+        f"• Leaderboard - Top 30 every 15 min (default)\n"
+        f"• Legacy - Individual tweet notifications\n\n"
         f"📌 **Usage**\n"
-        f"Post CA → Bot scans X → 3h monitoring"
+        f"Post token CA → Bot scans X → 3h monitoring"
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 

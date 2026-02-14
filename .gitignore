@@ -2,6 +2,7 @@
 .env
 accounts.txt
 accounts.db
+test_accounts.txt
 
 # Python
 __pycache__/

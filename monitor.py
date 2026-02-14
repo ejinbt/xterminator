@@ -1,7 +1,11 @@
+"""
+Token Monitor - Scrapes X for token mentions and tracks stats.
+"""
 import asyncio
 import datetime
 import os
 import random
+
 import pandas as pd
 from loguru import logger
 
@@ -9,7 +13,7 @@ from loguru import logger
 from scraper_utils import get_api
 import scraper  # This imports the patched scraper.py to apply the monkey patch
 
-from twscrape import API, gather
+from twscrape import API
 import config
 from token_tracker import tracker
 
