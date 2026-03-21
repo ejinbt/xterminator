@@ -19,7 +19,7 @@ from token_tracker import tracker
 
 
 class TokenMonitor:
-    def __init__(self, token_keyword, bot=None, chat_id=None, token_name=None):
+    def __init__(self, token_keyword, bot=None, chat_id=None, token_name=None, poll_interval_seconds: int = 900):
         self.token = token_keyword
         self.token_name = token_name  # e.g., "$ELON" or "Elon Coin"
         self.api = get_api()
@@ -28,7 +28,9 @@ class TokenMonitor:
         self.results = []
         self.seen_ids = set()  # Track seen tweet IDs
         self.filename = f"monitor_{self.token}_{int(self.start_time.timestamp())}.csv"
-        
+        self.poll_interval_seconds = poll_interval_seconds
+        self._interval_changed = asyncio.Event()
+
         # Telegram bot reference for sending updates
         self.bot = bot
         self.chat_id = chat_id
@@ -74,11 +76,21 @@ class TokenMonitor:
         
         # Monitoring Loop (initial_count is called separately before start())
         while datetime.datetime.now() < self.end_time:
-            # Wait for next poll
-            sleep_time = random.randint(config.POLL_INTERVAL_MIN, config.POLL_INTERVAL_MAX)
+            # Wait for next poll with ±10% jitter for stealth
+            base = self.poll_interval_seconds
+            delta = int(base * 0.10)
+            sleep_time = random.randint(max(1, base - delta), base + delta)
             logger.info(f"[{self.token}] Sleeping for {sleep_time}s...")
-            await asyncio.sleep(sleep_time)
-            
+
+            # Wake early if interval changed via /interval
+            try:
+                await asyncio.wait_for(self._interval_changed.wait(), timeout=sleep_time)
+                self._interval_changed.clear()
+                logger.info(f"[{self.token}] Poll interval updated to {self.poll_interval_seconds}s")
+                continue
+            except asyncio.TimeoutError:
+                pass
+
             await self.poll_new_mentions()
             
         # Mark complete
@@ -89,6 +101,11 @@ class TokenMonitor:
             await self.send_final_summary()
         
         logger.info(f"[{self.token}] Monitoring finished.")
+
+    def set_poll_interval(self, seconds: int):
+        """Update poll interval for a running monitor and wake sleep early."""
+        self.poll_interval_seconds = max(60, int(seconds))
+        self._interval_changed.set()
 
     async def initial_count(self):
         logger.info(f"[{self.token}] Checking existing mentions on X...")

@@ -125,6 +125,10 @@ async def load_accounts():
 
     logger.info(f"Loaded {count} accounts into the pool.")
     
+    # Reset stale locks so accounts aren't stuck from previous crashes
+    logger.info("Resetting account locks...")
+    await api.pool.reset_locks()
+
     # Login check
     logger.info("Verifying accounts...")
     await api.pool.login_all()
