@@ -570,12 +570,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"`/interval [min|reset]` - Set poll interval\n"
         f"`/sleep [min]` - Pause for N minutes\n"
         f"`/wake` - Resume monitoring\n"
+        f"`/reset` - Clear all data & CSVs\n"
         f"`/restart` - Restart bot process\n\n"
         f"📌 **Modes**\n"
         f"• Leaderboard - Top 30 every 15 min (default)\n"
         f"• Legacy - Individual tweet notifications\n\n"
         f"📌 **Usage**\n"
-        f"Post token CA → Bot scans X → 3h monitoring"
+        f"Post token CA → Bot scans X → 3h monitoring\n\n"
+        f"⚠️ Run `/reset` periodically to clear old data and prevent VPS storage from filling up."
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
