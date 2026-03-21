@@ -54,8 +54,63 @@ except ImportError:
 
 # Now import twscrape
 from twscrape import API
+from twscrape import xclid
 from loguru import logger
 import config
+import json
+import re
+
+# ============================================
+# PATCH: Fix twscrape xclid script parsing
+# Twitter changes their page structure frequently, breaking the split.
+# This patch handles both the old and new formats gracefully.
+# ============================================
+def _script_url(k: str, v: str):
+    return f"https://abs.twimg.com/responsive-web/client-web/{k}.{v}.js"
+
+_original_get_scripts_list = xclid.get_scripts_list
+
+def _patched_get_scripts_list(text: str):
+    # Try multiple known split patterns (Twitter changes these)
+    split_patterns = [
+        ('e=>e+"."+', '[e]+"a.js"'),
+        ('e=>e+"."+', '+"a.js"'),
+    ]
+
+    scripts_str = None
+    for start_pat, end_pat in split_patterns:
+        if start_pat in text:
+            try:
+                scripts_str = text.split(start_pat)[1].split(end_pat)[0]
+                break
+            except IndexError:
+                continue
+
+    if scripts_str is None:
+        # Fallback: try to find script URLs directly via regex
+        logger.warning("twscrape: Could not parse scripts list with known patterns, trying regex fallback")
+        for match in re.finditer(r'https://abs\.twimg\.com/responsive-web/client-web/[^"\']+\.js', text):
+            yield match.group(0)
+        return
+
+    try:
+        for k, v in json.loads(scripts_str).items():
+            yield _script_url(k, f"{v}a")
+    except json.decoder.JSONDecodeError:
+        # Fix unquoted keys
+        fixed = re.sub(
+            r'([,\{])(\s*)([\w]+_[\w_]+)(\s*):',
+            r'\1\2"\3"\4:',
+            scripts_str
+        )
+        try:
+            for k, v in json.loads(fixed).items():
+                yield _script_url(k, f"{v}a")
+        except json.decoder.JSONDecodeError:
+            logger.error("twscrape: Failed to parse scripts JSON even after fix")
+
+xclid.get_scripts_list = _patched_get_scripts_list
+logger.info("Applied twscrape xclid patch")
 
 async def load_accounts():
     """
