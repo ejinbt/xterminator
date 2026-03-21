@@ -61,56 +61,60 @@ import json
 import re
 
 # ============================================
-# PATCH: Fix twscrape xclid script parsing
-# Twitter changes their page structure frequently, breaking the split.
-# This patch handles both the old and new formats gracefully.
+# PATCH: Fix twscrape xclid parse_anim_idx
+# Twitter moved "ondemand.s" from a chunk map key to a value in a name map.
+# This patch handles both old and new formats.
 # ============================================
-def _script_url(k: str, v: str):
-    return f"https://abs.twimg.com/responsive-web/client-web/{k}.{v}.js"
+def _rextr(s: str, begin: str, end: str, pos: int) -> str | None:
+    end_idx = s.rfind(end, 0, pos)
+    if end_idx < 0:
+        return None
+    begin_idx = s.rfind(begin, 0, end_idx)
+    if begin_idx < 0:
+        return None
+    return s[begin_idx + len(begin):end_idx]
 
-_original_get_scripts_list = xclid.get_scripts_list
 
-def _patched_get_scripts_list(text: str):
-    # Try multiple known split patterns (Twitter changes these)
-    split_patterns = [
-        ('e=>e+"."+', '[e]+"a.js"'),
-        ('e=>e+"."+', '+"a.js"'),
-    ]
+def _fextr(s: str, begin: str, end: str, pos: int = 0) -> str | None:
+    start = s.find(begin, pos)
+    if start < 0:
+        return None
+    start += len(begin)
+    stop = s.find(end, start)
+    if stop < 0:
+        return None
+    return s[start:stop]
 
-    scripts_str = None
-    for start_pat, end_pat in split_patterns:
-        if start_pat in text:
-            try:
-                scripts_str = text.split(start_pat)[1].split(end_pat)[0]
-                break
-            except IndexError:
-                continue
 
-    if scripts_str is None:
-        # Fallback: try to find script URLs directly via regex
-        logger.warning("twscrape: Could not parse scripts list with known patterns, trying regex fallback")
-        for match in re.finditer(r'https://abs\.twimg\.com/responsive-web/client-web/[^"\']+\.js', text):
-            yield match.group(0)
-        return
+async def _patched_parse_anim_idx(text: str) -> list[int]:
+    # New format: "ondemand.s" is a value in a name map, hash lives in a second
+    # map under the same key further in the HTML.
+    ondemand_pos = text.find('"ondemand.s"')
+    if ondemand_pos >= 0:
+        ondemand_key = _rextr(text, ",", ':', ondemand_pos)
+        if ondemand_key:
+            ondemand_s = _fextr(text, ondemand_key + ':"', '"', ondemand_pos)
+            if ondemand_s:
+                url = xclid.script_url("ondemand.s", f"{ondemand_s}a")
+                js_text = await xclid.get_tw_page_text(url)
+                items = [int(x.group(2)) for x in xclid.INDICES_REGEX.finditer(js_text)]
+                if items:
+                    return items
 
-    try:
-        for k, v in json.loads(scripts_str).items():
-            yield _script_url(k, f"{v}a")
-    except json.decoder.JSONDecodeError:
-        # Fix unquoted keys
-        fixed = re.sub(
-            r'([,\{])(\s*)([\w]+_[\w_]+)(\s*):',
-            r'\1\2"\3"\4:',
-            scripts_str
-        )
-        try:
-            for k, v in json.loads(fixed).items():
-                yield _script_url(k, f"{v}a")
-        except json.decoder.JSONDecodeError:
-            logger.error("twscrape: Failed to parse scripts JSON even after fix")
+    # Fallback: old format where the chunk map contains ondemand.s as a key.
+    scripts = list(xclid.get_scripts_list(text))
+    scripts = [u for u in scripts if "/ondemand.s." in u]
+    if not scripts:
+        raise Exception("Couldn't get XClientTxId scripts")
+    js_text = await xclid.get_tw_page_text(scripts[0])
+    items = [int(x.group(2)) for x in xclid.INDICES_REGEX.finditer(js_text)]
+    if not items:
+        raise Exception("Couldn't get XClientTxId indices")
+    return items
 
-xclid.get_scripts_list = _patched_get_scripts_list
-logger.info("Applied twscrape xclid patch")
+
+xclid.parse_anim_idx = _patched_parse_anim_idx
+logger.info("Applied twscrape xclid patch (parse_anim_idx)")
 
 async def load_accounts():
     """
