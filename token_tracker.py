@@ -185,6 +185,7 @@ class TokenTracker:
             return
         
         # Build message
+        interval_min = interval_sec // 60
         msg = f"📊 **TOP {len(top_tokens)} TOKENS**\n\n"
         
         for i, stats in enumerate(top_tokens, 1):
@@ -214,7 +215,6 @@ class TokenTracker:
                 f"🆕 New: {running} | ✅ {verified} | 👤 {regular} | ⏱️ {mon_time}\n\n"
             )
         
-        interval_min = interval_sec // 60
         msg += f"🔄 _Updates every {interval_min} min_"
         
         try:
