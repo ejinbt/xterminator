@@ -674,7 +674,7 @@ def main():
         except Exception:
             pass
         asyncio.create_task(leaderboard_loop(application))
-        logger.info(f"⏰ Leaderboard loop started (every {LEADERBOARD_INTERVAL//60} min)")
+        logger.info(f"⏰ Leaderboard loop started (per-channel intervals)")
     
     app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     
