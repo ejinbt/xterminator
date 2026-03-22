@@ -25,8 +25,8 @@ from token_tracker import tracker
 GECKOTERMINAL_API = "https://api.geckoterminal.com/api/v2/search/pools?query={token}&page=1"
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/search?q={token}"
 
-# Leaderboard interval (seconds)
-LEADERBOARD_INTERVAL = 900  # 15 minutes
+# Per-chat leaderboard last-send times (chat_id -> datetime)
+CHAT_LEADERBOARD_LAST_SENT = {}
 
 # TOKEN CACHE
 TOKEN_INFO_CACHE = {}  # token_address -> (name, ticker, chain)
@@ -381,7 +381,7 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             msg = (
                 f"✅ **Leaderboard Mode**\n\n"
-                f"• Top 30 tokens every 15 min\n"
+                f"• Top 30 tokens at your set interval\n"
                 f"• Ranked by avg tweet count\n"
                 f"• 🎯 Clean & organized"
             )
@@ -518,6 +518,7 @@ async def cmd_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if arg == "reset":
         CHAT_POLL_INTERVAL.pop(chat_id, None)
+        CHAT_LEADERBOARD_LAST_SENT.pop(chat_id, None)
         default_seconds = config.POLL_INTERVAL_MIN
         updated = 0
         for m in list(CHAT_MONITORS.get(chat_id, set())):
@@ -541,6 +542,7 @@ async def cmd_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         seconds = minutes * 60
         CHAT_POLL_INTERVAL[chat_id] = seconds
+        CHAT_LEADERBOARD_LAST_SENT.pop(chat_id, None)  # Reset so next leaderboard uses new interval
         updated = 0
         for m in list(CHAT_MONITORS.get(chat_id, set())):
             if datetime.datetime.now() < m.end_time:
@@ -573,7 +575,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"`/reset` - Clear all data & CSVs\n"
         f"`/restart` - Restart bot process\n\n"
         f"📌 **Modes**\n"
-        f"• Leaderboard - Top 30 every 15 min (default)\n"
+        f"• Leaderboard - Top 30 at your set interval (default 15 min)\n"
         f"• Legacy - Individual tweet notifications\n\n"
         f"📌 **Usage**\n"
         f"Post token CA → Bot scans X → 3h monitoring\n\n"
@@ -584,32 +586,36 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== PERIODIC TASKS ====================
 
 async def leaderboard_loop(app):
-    """Background task to send leaderboard every 15 minutes"""
+    """Background task to send leaderboard based on per-channel interval"""
     logger.info("⏰ Leaderboard loop started")
-    
+
     while True:
-        await asyncio.sleep(LEADERBOARD_INTERVAL)
-        
+        await asyncio.sleep(30)  # Check every 30s for due channels
+
         try:
             if tracker.mode != "leaderboard":
-                logger.debug("Leaderboard skipped (legacy mode)")
                 continue
             if is_sleeping():
-                logger.debug(f"Leaderboard paused until {sleep_until_str()}")
                 continue
-            
+
             if not tracker.get_active_tokens():
-                logger.debug("Leaderboard skipped (no active tokens)")
                 continue
-            
-            # Send leaderboard to all tracked channels
-            if CHANNEL_IDS:
-                for chat_id in CHANNEL_IDS:
-                    logger.info(f"📊 Sending leaderboard to {chat_id}...")
-                    await tracker.send_leaderboard(app.bot, chat_id)
-            elif tracker.chat_id:
-                logger.info("📊 Sending scheduled leaderboard...")
-                await tracker.send_leaderboard(app.bot, tracker.chat_id)
+
+            now = datetime.datetime.now()
+
+            # Build list of channels to check
+            channels = list(CHANNEL_IDS) if CHANNEL_IDS else ([tracker.chat_id] if tracker.chat_id else [])
+
+            for chat_id in channels:
+                interval_sec = CHAT_POLL_INTERVAL.get(chat_id, config.POLL_INTERVAL_MIN)
+                last_sent = CHAT_LEADERBOARD_LAST_SENT.get(chat_id)
+
+                if last_sent and (now - last_sent).total_seconds() < interval_sec:
+                    continue
+
+                logger.info(f"📊 Sending leaderboard to {chat_id} (interval: {interval_sec // 60}m)...")
+                await tracker.send_leaderboard(app.bot, chat_id, interval_sec=interval_sec)
+                CHAT_LEADERBOARD_LAST_SENT[chat_id] = now
         except Exception as e:
             logger.error(f"Leaderboard loop error: {e}")
 

@@ -168,7 +168,7 @@ class TokenTracker:
     def get_stats(self, token_address: str) -> Optional[TokenStats]:
         return self.tokens.get(token_address)
     
-    async def send_leaderboard(self, bot=None, chat_id=None):
+    async def send_leaderboard(self, bot=None, chat_id=None, interval_sec=900):
         """Send the top 30 leaderboard for a specific channel"""
         bot = bot or self.bot
         chat_id = chat_id or self.chat_id
@@ -210,11 +210,12 @@ class TokenTracker:
             msg += (
                 f"{rank} **{name}**\n"
                 f"`{ca}`\n"
-                f"📈 Avg: **{avg}** | Total: **{total}** | +{last_15} (15m)\n"
+                f"📈 Avg: **{avg}** | Total: **{total}** | +{last_15} ({interval_min}m)\n"
                 f"🆕 New: {running} | ✅ {verified} | 👤 {regular} | ⏱️ {mon_time}\n\n"
             )
         
-        msg += f"🔄 _Updates every 15 min_"
+        interval_min = interval_sec // 60
+        msg += f"🔄 _Updates every {interval_min} min_"
         
         try:
             await bot.send_message(
